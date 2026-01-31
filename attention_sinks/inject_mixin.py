@@ -22,13 +22,13 @@ MODEL_NAME_MAPPING = {
     "Yi": "YiModel",
 }
 ATTENTION_NAME_MAPPING = {
-    "llama": "LlamaAttention",
+    "llama": "",
     "falcon": "FalconAttention",
     "mpt": "MptAttention",
     "gpt_neox": "GPTNeoXAttention",
     "gptj": "GPTJAttention",
-    "mistral": "MistralAttention",
-    "qwen": "QWenAttention",
+    "mistral": "",
+    "qwen": "",
     "stablelm_epoch": "Attention",
     "btlm": "BTLMAttention",
     "Yi": "YiAttention",
@@ -82,7 +82,7 @@ class InjectAttentionSinksMixin:
         # Overwrite broken model kwargs, prevents indexing error when generating
         # The default _update_model_kwargs_for_generation expects the seq_length to keep growing
         # as generation occurs, but that isn't the case
-        model._update_model_kwargs_for_generation = types.MethodType(_update_model_kwargs_for_generation, model)
+        # model._update_model_kwargs_for_generation = types.MethodType(_update_model_kwargs_for_generation, model)
 
         return model
 

@@ -3,6 +3,7 @@ Adapted from https://github.com/mit-han-lab/streaming-llm
 """
 
 from dataclasses import dataclass
+from typing import List
 
 import torch
 
@@ -32,6 +33,9 @@ class AttentionSinkKVCache:
     attention_sink_window_size: int = 1020
     k_seq_dim: int = 2
     v_seq_dim: int = 2
+    attention_sink_layer: int = 0
+    attention_sink_layer_window: int = 1
+    attention_sink_full_attention_layer: List[int] = -1
 
     def __post_init__(self):
         self.cache_size = self.attention_sink_size + self.attention_sink_window_size
@@ -41,29 +45,37 @@ class AttentionSinkKVCache:
     def __call__(self, past_key_values):
         if past_key_values is None:
             return None
-        seq_len = past_key_values[0][0].size(self.k_seq_dim)
-        if seq_len <= self.cache_size:
-            return past_key_values
-        return [
-            [
-                torch.cat(
-                    [
-                        self.k_slice(k, 0, self.attention_sink_size),
-                        self.k_slice(k, seq_len - self.attention_sink_window_size, seq_len),
-                    ],
-                    dim=self.k_seq_dim,
-                ),
-                torch.cat(
-                    [
-                        self.v_slice(v, 0, self.attention_sink_size),
-                        self.v_slice(v, seq_len - self.attention_sink_window_size, seq_len),
-                    ],
-                    dim=self.v_seq_dim,
-                ),
-            ]
-            for k, v in past_key_values
-        ]
+        num_layers = len(past_key_values)
+        start = self.attention_sink_layer
+        end = start + self.attention_sink_layer_window
+        step = 1 if self.attention_sink_layer_window >= 0 else -1
+        end = max(0, min(end, num_layers))
+        for layer_idx in range(start, end, step):
+            if layer_idx in self.attention_sink_full_attention_layer:
+                continue
+            k, v = past_key_values[layer_idx]
+            seq_len = past_key_values[layer_idx][0].size(self.k_seq_dim)
+            if seq_len <= self.cache_size:
+                continue
 
+            new_k = torch.cat(
+                        [
+                            self.k_slice(k, 0, self.attention_sink_size),
+                            self.k_slice(k, seq_len - self.attention_sink_window_size, seq_len),
+                        ],
+                        dim=self.k_seq_dim,
+                    )
+            new_v = torch.cat(
+                        [
+                            self.v_slice(v, 0, self.attention_sink_size),
+                            self.v_slice(v, seq_len - self.attention_sink_window_size, seq_len),
+                        ],
+                        dim=self.v_seq_dim,
+                    )
+            past_key_values.key_cache[layer_idx] = new_k
+            past_key_values.value_cache[layer_idx] = new_v
+        # past_key_values._seen_tokens = seq_len
+        return past_key_values
     def evict_for_space(self, past_key_values, num_coming):
         if past_key_values is None:
             return None
