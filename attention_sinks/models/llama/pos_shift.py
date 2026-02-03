@@ -16,6 +16,8 @@ __all__ = ["llama_pos_shift_attention_forward"]
 
 
 def apply_rotary_pos_emb_single(x, cos, sin, position_ids):
+    # 对单个张量应用 RoPE，并显式指定 position_ids。
+    # 用于 attention sink：query 和 key 可以使用不同的“位置序列”。
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
     sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
@@ -37,6 +39,7 @@ def llama_pos_shift_attention_forward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
 
+    # 1) 线性投影得到 Q/K/V（带张量并行切分的兼容实现）
     if self.config.pretraining_tp > 1:
         key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
         query_slices = self.q_proj.weight.split((self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0)
@@ -57,19 +60,21 @@ def llama_pos_shift_attention_forward(
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
+    # 2) 变形为 [bs, heads, seq, head_dim]
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
+    # 3) 计算 KV 的“实际序列长度”（含缓存）
     kv_seq_len = key_states.shape[-2]
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
     cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-    ### Shift Pos: query pos is min(cache_size, idx)
+    # 4) Query 位置：使用原始 position_ids（保持真实时间步）
     # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
     query_states = apply_rotary_pos_emb_single(query_states, cos, sin, position_ids)
-    ###
 
+    # 5) 拼接历史 KV（如果存在）
     if past_key_value is not None:
         # reuse k, v, self_attention
         key_states = torch.cat([past_key_value[0], key_states], dim=2)
@@ -77,15 +82,17 @@ def llama_pos_shift_attention_forward(
 
     past_key_value = (key_states, value_states) if use_cache else None
 
-    ### Shift Pos: key pos is the pos in cache
+    # 6) Key 位置：使用缓存内部的连续位置（0..kv_seq_len-1）
+    # 这样能让被裁剪后的 KV 在 RoPE 上对齐“当前缓存布局”
     key_position_ids = torch.arange(kv_seq_len, device=position_ids.device).unsqueeze(0)
     key_states = apply_rotary_pos_emb_single(key_states, cos, sin, key_position_ids)
-    ###
 
+    # 7) GQA 场景下重复 KV heads，使其与 query heads 对齐
     # repeat k/v heads if n_kv_heads < n_heads
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+    # 8) 计算注意力权重
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
     if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -101,6 +108,7 @@ def llama_pos_shift_attention_forward(
             )
         attn_weights = attn_weights + attention_mask
 
+    # 9) softmax + 加权求和
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -114,6 +122,7 @@ def llama_pos_shift_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
+    # 10) 输出投影
     if self.config.pretraining_tp > 1:
         attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
         o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
