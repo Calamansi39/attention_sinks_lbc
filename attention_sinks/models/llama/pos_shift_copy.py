@@ -294,17 +294,18 @@ def _group_attention(
     if query_states.size(1) == 0:
         return None, None
 
-    q_len = query_states.size(-2)
     key_states = repeat_kv(key_states, num_key_value_groups)
     value_states = repeat_kv(value_states, num_key_value_groups)
-    kv_len = key_states.size(-2)
-    causal_mask = attention_mask
-    if attention_mask is not None and attention_mask.dim() == 4:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
 
-    # Ported from transformers==4.45.2 LlamaSdpaAttention.forward.
+    q_len = query_states.size(-2)
+    kv_len = key_states.size(-2)
+    causal_mask = None
+    if attention_mask is not None and attention_mask.dim() == 4 and attention_mask.size(-1) >= kv_len:
+        causal_mask = attention_mask[..., -kv_len:]
+
+    # Match HF LlamaSdpaAttention behavior: use SDPA kernel when attention weights are not requested.
     if not output_attentions:
-        # torch==2.1.x memory-efficient SDPA may fail with non-contiguous + custom masks.
+        # Avoid known non-contiguous + custom mask issue on some torch/cuda combinations.
         if query_states.device.type == "cuda" and causal_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()

@@ -22,12 +22,12 @@ MODEL_NAME_MAPPING = {
     "Yi": "YiModel",
 }
 ATTENTION_NAME_MAPPING = {
-    "llama": ["LlamaAttention", "LlamaFlashAttention2", "LlamaSdpaAttention"],
+    "llama": "",
     "falcon": "FalconAttention",
     "mpt": "MptAttention",
     "gpt_neox": "GPTNeoXAttention",
     "gptj": "GPTJAttention",
-    "mistral": ["MistralAttention", "MistralFlashAttention2", "MistralSdpaAttention"],
+    "mistral": "",
     "qwen": "",
     "stablelm_epoch": "Attention",
     "btlm": "BTLMAttention",
@@ -121,51 +121,12 @@ class InjectAttentionSinksMixin:
         def overwrite_forward(module) -> None:
             module.forward = types.MethodType(ATTENTION_FORWARD_MAPPING[model_type], module)
 
-        target_names = ATTENTION_NAME_MAPPING[model_type]
-        if isinstance(target_names, str):
-            target_names = [target_names]
-
-        call_count = 0
-        for target_name in target_names:
-            if not target_name:
-                continue
-            call_count += cls._call_modules_by_name(model, target_name, overwrite_forward)
-        return call_count
+        return cls._call_modules_by_name(model, ATTENTION_NAME_MAPPING[model_type], overwrite_forward)
 
     @classmethod
     def _inject_attention_sink_kv_cache(cls, model, **attention_sink_kwargs) -> int:
         model_type = model.config.model_type
         attention_sink_kwargs["k_seq_dim"], attention_sink_kwargs["v_seq_dim"] = KV_DIM_MAPPING[model_type]
-
-        # For Llama/Mistral we use Duo-style split-head cache and attention directly in attention forward.
-        # We still expose the same knobs through model.config.
-        if model_type in {"llama", "mistral"}:
-            default_kwargs = {
-                "attention_sink_size": 4,
-                "attention_sink_window_size": 512,
-                "attention_sink_layer": 0,
-                "attention_sink_layer_window": 1,
-                "attention_sink_full_attention_layer": -1,
-                "attention_sink_head": None,
-                "attention_sink_heads": None,
-                "attention_sink_full_attention_heads": None,
-            }
-            merged_kwargs = {**default_kwargs, **attention_sink_kwargs}
-            for key, value in merged_kwargs.items():
-                setattr(model.config, key, value)
-
-            def overwrite_forward(module):
-                module._attention_sink_duo_enabled = True
-
-            target_names = ATTENTION_NAME_MAPPING[model_type]
-            if isinstance(target_names, str):
-                target_names = [target_names]
-            call_count = 0
-            for target_name in target_names:
-                if not target_name:
-                    continue
-                call_count += cls._call_modules_by_name(model, target_name, overwrite_forward)
-            return call_count
 
         def overwrite_forward(module):
             # Create the new cache
